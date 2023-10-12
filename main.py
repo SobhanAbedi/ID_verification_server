@@ -6,12 +6,15 @@ from sqlmodel import Field, Session, SQLModel, create_engine
 import boto3
 import logging
 from botocore.exceptions import ClientError
+import pathlib
+import filetype
+
 
 # TODO: remove echo=True
 engine = create_engine(PGSQL_DATABASE_URL, echo=True)
 SQLModel.metadata.create_all(engine)
 
-s3r = boto3.resource(
+s3 = boto3.resource(
     's3',
     endpoint_url=S3_STORAGE_URL,
     aws_access_key_id=S3_STORAGE_ACC,
@@ -19,7 +22,7 @@ s3r = boto3.resource(
 )
 
 try:
-    s3c = s3r.meta.client
+    s3c = s3.meta.client
     response = s3c.head_bucket(Bucket=S3_BUCKET_NANE)
     
 except ClientError as err:
@@ -28,7 +31,7 @@ except ClientError as err:
 
     if status == 404:
         try:
-            bucket = s3r.Bucket(S3_BUCKET_NANE)
+            bucket = s3.Bucket(S3_BUCKET_NANE)
             bucket.create(ACL='private')
         except ClientError as exc:
             logging.error(exc)
@@ -51,8 +54,19 @@ async def root():
 async def submit_req(request: Request, lname: Annotated[str, Form()], email: Annotated[str, Form()],
                      natid: Annotated[str, Form()],
                      img1: UploadFile, img2: UploadFile):
-    # print(f'name: {lname}\nmail: {email}')
-    # async with aiofiles.open('img1', 'wb') as out_file:
-    #     while content := await img1.read(1024):  # async read chunk
-    #         await out_file.write(content)  # async write chunk
-    return {"message": f"got it {request.client.host}"}
+    # TODO: Check the email to be unique
+    img1_name = f'{email}-{lname}-1{pathlib.Path(img1.filename).suffix.lower()}'
+    img2_name = f'{email}-{lname}-2{pathlib.Path(img2.filename).suffix.lower()}'
+    try:
+        s3b = s3.Bucket(S3_BUCKET_NANE)
+        s3b.put_object(ACL='private', Body=img1.file, Key=img1_name)
+        s3b.put_object(ACL='private', Body=img2.file, Key=img2_name)
+    except ClientError as e:
+        logging.error(e)
+    id_check_request = IDCheckRequest(lname=lname, email=email, natid=natid, ipadd=request.client.host,
+                                      img1=img1_name, img2=img2_name, state='waiting')
+    with Session(engine) as session:
+        session.add(id_check_request)
+        session.commit()
+
+    return {"message": "Request Submitted"}
