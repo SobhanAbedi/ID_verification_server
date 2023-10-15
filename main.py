@@ -1,16 +1,15 @@
 from fastapi import FastAPI, UploadFile, Form, Request
-from typing import Annotated
-from helpers.db_url import *
-from helpers.models import IDCheckRequest  # NEEDED. Don't Remove!
-from sqlmodel import Field, Session, SQLModel, create_engine
+from typing import Annotated, List
+from secrets_pkg.db_secrets import *
+from models_pkg.models import State, IDCheckRequest  # NEEDED. Don't Remove!
+from sqlmodel import Session, SQLModel, create_engine, select
+from sqlalchemy.exc import IntegrityError
 import boto3
 import logging
 from botocore.exceptions import ClientError
 import pathlib
-import filetype
 
-
-# TODO: remove echo=True
+# TODO: Remove echo=True at production
 engine = create_engine(PGSQL_DATABASE_URL, echo=True)
 SQLModel.metadata.create_all(engine)
 
@@ -45,28 +44,52 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-    # for bucket in s3r.buckets.all():
-    #     print(bucket.name)
-    return {"message": "Hello World"}
+    # TODO: Remove this endpoint at production
+    reqs: List[IDCheckRequest] = []
+    with Session(engine) as session:
+        reqs = session.exec(select(IDCheckRequest)).all()
+    return {"Requests": reqs}
 
 
 @app.post("/submit/")
 async def submit_req(request: Request, lname: Annotated[str, Form()], email: Annotated[str, Form()],
-                     natid: Annotated[str, Form()],
-                     img1: UploadFile, img2: UploadFile):
-    # TODO: Check the email to be unique
+                     natid: Annotated[str, Form()], img1: UploadFile, img2: UploadFile):
+
     img1_name = f'{email}-{lname}-1{pathlib.Path(img1.filename).suffix.lower()}'
     img2_name = f'{email}-{lname}-2{pathlib.Path(img2.filename).suffix.lower()}'
-    try:
-        s3b = s3.Bucket(S3_BUCKET_NANE)
-        s3b.put_object(ACL='private', Body=img1.file, Key=img1_name)
-        s3b.put_object(ACL='private', Body=img2.file, Key=img2_name)
-    except ClientError as e:
-        logging.error(e)
+
     id_check_request = IDCheckRequest(lname=lname, email=email, natid=natid, ipadd=request.client.host,
-                                      img1=img1_name, img2=img2_name, state='waiting')
-    with Session(engine) as session:
+                                      img1=img1_name, img2=img2_name)
+
+    try:
+        session = Session(engine)
         session.add(id_check_request)
         session.commit()
+    except IntegrityError as exc:
+        return {"message": str(exc.__cause__)}
+    except:
+        return {"message": "Unknown Error!"}
+    else:
+        try:
+            s3b = s3.Bucket(S3_BUCKET_NANE)
+            s3b.put_object(ACL='private', Body=img1.file, Key=img1_name)
+            s3b.put_object(ACL='private', Body=img2.file, Key=img2_name)
+        except ClientError as e:
+            return {"message": str(e)}
 
     return {"message": "Request Submitted"}
+
+
+@app.get("/status/")
+async def submit_req(request: Request, natid: str):
+    reqs: List[IDCheckRequest] = []
+    with Session(engine) as session:
+        reqs = session.exec(select(IDCheckRequest).where(IDCheckRequest.natid == natid)).all()
+    if len(reqs) == 0:
+        return {"message": "No requests found. Submit Another request please"}
+    elif len(reqs) > 1:
+        # TODO: Error Handling
+        return {"message": "Unknown Error!"}
+    if request.client.host != reqs[0].ipadd:
+        return {"message": "You don't have access to this record"}
+    return {"message": reqs[0].state}
