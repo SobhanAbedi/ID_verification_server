@@ -46,11 +46,24 @@ channel.queue_declare(queue='task_queue', durable=True)
 print(' [*] Waiting for messages. To exit press CTRL+C')
 
 
+def send_email(mail_addr: str, msg: str) -> None:
+    print(f"Sending Email to {mail_addr}")
+    print(requests.post(
+        MAIL_SERVICE_API_URL,
+        auth=("api", MAIL_SERVICE_API_KEY),
+        data={"from": f"ID Checker <mailgun@{MAIL_SERVICE_DOMAIN}>",
+              "to": [mail_addr],
+              "subject": "ID Check",
+              "text": msg}).json())
+
+
 def accept(request: IDCheckRequest) -> None:
     request.state = State.ACCEPTED
     with Session(engine) as session:
         session.add(request)
         session.commit()
+        session.refresh(request)
+    send_email(request.email, "Accepted")
 
 
 def decline(request: IDCheckRequest) -> None:
@@ -58,6 +71,8 @@ def decline(request: IDCheckRequest) -> None:
     with Session(engine) as session:
         session.add(request)
         session.commit()
+        session.refresh(request)
+    send_email(request.email, "Declined")
 
 
 def set_verifying_state(request: IDCheckRequest) -> None:
