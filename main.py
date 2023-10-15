@@ -8,6 +8,7 @@ import boto3
 import logging
 from botocore.exceptions import ClientError
 import pathlib
+import pika
 
 # TODO: Remove echo=True at production
 engine = create_engine(PGSQL_DATABASE_URL, echo=True)
@@ -38,6 +39,11 @@ except ClientError as err:
         logging.error("Access denied, %s", errcode)
     else:
         logging.exception("Error in request, %s", errcode)
+
+
+connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_URL_PARAMS))
+channel = connection.channel()
+channel.queue_declare(queue='task_queue', durable=True)
 
 app = FastAPI()
 
@@ -76,6 +82,14 @@ async def submit_req(request: Request, lname: Annotated[str, Form()], email: Ann
             s3b.put_object(ACL='private', Body=img2.file, Key=img2_name)
         except ClientError as e:
             return {"message": str(e)}
+
+    channel.basic_publish(
+        exchange='',
+        routing_key='task_queue',
+        body=email,
+        properties=pika.BasicProperties(
+            delivery_mode=pika.spec.PERSISTENT_DELIVERY_MODE
+        ))
 
     return {"message": "Request Submitted"}
 
