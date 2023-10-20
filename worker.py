@@ -1,178 +1,59 @@
-from typing import Annotated, List, Dict
-from secrets_pkg.db_secrets import *
-from models_pkg.models import State, IDCheckRequest  # NEEDED. Don't Remove!
-from sqlmodel import Session, SQLModel, create_engine, select
-import boto3
-import logging
-from botocore.exceptions import ClientError
-import pika
-import requests
-import io
+from helpers_pkg import db_helper, storage_helper, workqueue_helper, imagga_helper
 from mypy_boto3_s3.service_resource import Bucket
-
-# TODO: Remove echo=True at production
-engine = create_engine(PGSQL_DATABASE_URL, echo=True)
-SQLModel.metadata.create_all(engine)
-
-s3 = boto3.resource(
-    's3',
-    endpoint_url=S3_STORAGE_URL,
-    aws_access_key_id=S3_STORAGE_ACC,
-    aws_secret_access_key=S3_STORAGE_SEC
-)
-
-try:
-    s3c = s3.meta.client
-    response = s3c.head_bucket(Bucket=S3_BUCKET_NANE)
-
-except ClientError as err:
-    status = err.response["ResponseMetadata"]["HTTPStatusCode"]
-    errcode = err.response["Error"]["Code"]
-
-    if status == 404:
-        try:
-            s3b = s3.Bucket(S3_BUCKET_NANE)
-            s3b.create(ACL='private')
-        except ClientError as exc:
-            logging.error(exc)
-    elif status == 403:
-        logging.error("Access denied, %s", errcode)
-    else:
-        logging.exception("Error in request, %s", errcode)
-
-connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_URL_PARAMS))
-channel = connection.channel()
-channel.queue_declare(queue='task_queue', durable=True)
-print(' [*] Waiting for messages. To exit press CTRL+C')
+import time
 
 
-def send_email(mail_addr: str, msg: str) -> None:
-    print(f"Sending Email to {mail_addr}")
-    print(requests.post(
-        MAIL_SERVICE_API_URL,
-        auth=("api", MAIL_SERVICE_API_KEY),
-        data={"from": f"ID Checker <mailgun@{MAIL_SERVICE_DOMAIN}>",
-              "to": [mail_addr],
-              "subject": "ID Check",
-              "text": msg}).json())
-
-
-def accept(request: IDCheckRequest) -> None:
-    request.state = State.ACCEPTED
-    with Session(engine) as session:
-        session.add(request)
-        session.commit()
-        session.refresh(request)
-    send_email(request.email, "Accepted")
-
-
-def decline(request: IDCheckRequest) -> None:
-    request.state = State.DECLINED
-    with Session(engine) as session:
-        session.add(request)
-        session.commit()
-        session.refresh(request)
-    send_email(request.email, "Declined")
-
-
-def set_verifying_state(request: IDCheckRequest) -> None:
-    request.state = State.VERIFYING
-    with Session(engine) as session:
-        session.add(request)
-        session.commit()
-        session.refresh(request)
-
-
-def face_detect(bucket: Bucket, img_key: str) -> [float | None, str | None]:
-    img = io.BytesIO()
-    bucket.download_fileobj(img_key, img)
-    print("Got the image")
-    img.seek(0)
-    response = requests.post(
-        'https://api.imagga.com/v2/faces/detections',
-        auth=(IMAGGA_API_KEY, IMAGGA_API_SEC),
-        files={'image': img},
-        data={'return_face_id': 1}).json()
-    print(response)
-    if response['status']['type'] != 'success':
-        print("Couldn't process request!")
-        return None, None
-    if len(response['result']['faces']) != 1:
-        print("Bad Image")
-        return 0, None
-    else:
-        conf = response['result']['faces'][0]['confidence']
-        face_id = response['result']['faces'][0]['face_id']
-        print(f'Face Confidence is {conf}')
-        return conf, face_id
-
-
-def delete_images(bucket: Bucket, image_keys: List[str]):
-    objs: List[Dict[str, str]] = []
-    for key in image_keys:
-        objs.append({'Key': key})
-    bucket.delete_objects(Delete={'Objects': objs, 'Quiet': True})
+def face_resp_handler(bucket: Bucket, img_add: str, repeat_req: bool) -> str | None:
+    conf, face_id = imagga_helper.face_detect(bucket, img_add)
+    if face_id is None:
+        if conf is None and repeat_req is True:
+            return face_resp_handler(bucket, img_add, False)
+        else:
+            storage_helper.delete_images(bucket, [img_add])
+        return None
+    storage_helper.delete_images(bucket, [img_add])
+    return face_id
 
 
 def callback(ch, method, properties, body):
-    print(f" [x] Received {body.decode()}")
-    email = body.decode()
+    email = body.decode('utf8')
+    print(f" [x] Received {email}")
 
-    reqs: List[IDCheckRequest] = []
-    request: IDCheckRequest | None = None
-    with Session(engine) as session:
-        reqs = session.exec(select(IDCheckRequest).where(IDCheckRequest.email == email)).all()
-    for req in reqs:
-        if req.state == State.RECEIVED:
-            request = req
-            break
-
+    request = db_helper.get_request(engine, email)
     if request is None:
         print(" [x] Request Invalid")
         ch.basic_ack(delivery_tag=method.delivery_tag)
         return
-
+    db_helper.set_verification_state(engine, request)
     img1_add = request.img1
     img2_add = request.img2
-    set_verifying_state(request)
 
-    s3b = s3.Bucket(S3_BUCKET_NANE)
-
-    conf_img1, face_id_img1 = face_detect(s3b, img1_add)
-    if face_id_img1 is None:
-        if conf_img1 is not None and conf_img1 < 60:
-            decline(request)
-            ch.basic_ack(delivery_tag=method.delivery_tag)
-            delete_images(s3b, [img1_add, img2_add])
+    s3b = storage_helper.get_bucket(s3)
+    face_id1 = face_resp_handler(s3b, img1_add, True)
+    face_id2 = face_resp_handler(s3b, img2_add, True)
+    if None in (face_id1, face_id2):
+        db_helper.decline(engine, request)
+        ch.basic_ack(delivery_tag=method.delivery_tag)
         return
 
-    conf_img2, face_id_img2 = face_detect(s3b, img2_add)
-    if face_id_img2 is None:
-        if conf_img2 is not None and conf_img2 < 60:
-            decline(request)
-            ch.basic_ack(delivery_tag=method.delivery_tag)
-            delete_images(s3b, [img1_add, img2_add])
-        return
-
-    response = requests.get(
-        f'https://api.imagga.com/v2/faces/similarity?face_id={face_id_img1}&second_face_id={face_id_img2}',
-        auth=(IMAGGA_API_KEY, IMAGGA_API_SEC)).json()
-    print(response)
-    if response['status']['type'] != 'success':
-        print("Couldn't process request!")
+    similarity = imagga_helper.face_similarity(face_id1, face_id2)
+    if similarity is None or similarity < 60:
+        db_helper.decline(engine, request)
     else:
-        faces_similarity = response['result']['score']
-        print(f'Face Similarity is {faces_similarity}')
-        if faces_similarity < 60:
-            decline(request)
-        else:
-            accept(request)
+        db_helper.accept(engine, request)
 
     print(" [x] Done")
     ch.basic_ack(delivery_tag=method.delivery_tag)
-    delete_images(s3b, [img1_add, img2_add])
+    storage_helper.delete_images(s3b, [img1_add, img2_add])
 
-
-channel.basic_qos(prefetch_count=1)
-channel.basic_consume(queue='task_queue', on_message_callback=callback)
-channel.start_consuming()
+while True:
+    engine = db_helper.connect_to_db()
+    s3 = storage_helper.connect_to_storage()
+    channel = workqueue_helper.connect_to_channel()
+    if None not in (engine, s3, channel):
+        channel.basic_qos(prefetch_count=1)
+        channel.basic_consume(queue='task_queue', on_message_callback=callback)
+        channel.start_consuming()
+        print(' [*] Waiting for messages. To exit press CTRL+C')
+        break
+    time.sleep(10)

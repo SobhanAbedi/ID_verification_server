@@ -1,4 +1,4 @@
-from secrets_pkg.db_secrets import PGSQL_NATID_KEY
+from secrets_pkg.db_secret import PGSQL_NATID_KEY
 from typing import Optional
 from sqlmodel import Field, SQLModel
 import sqlalchemy
