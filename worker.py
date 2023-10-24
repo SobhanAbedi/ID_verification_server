@@ -1,6 +1,7 @@
 from helpers_pkg import db_helper, storage_helper, workqueue_helper, imagga_helper
 from mypy_boto3_s3.service_resource import Bucket
 import time
+import logging
 
 
 def face_resp_handler(bucket: Bucket, img_add: str, repeat_req: bool) -> str | None:
@@ -46,14 +47,14 @@ def callback(ch, method, properties, body):
     ch.basic_ack(delivery_tag=method.delivery_tag)
     storage_helper.delete_images(s3b, [img1_add, img2_add])
 
-while True:
-    engine = db_helper.connect_to_db()
-    s3 = storage_helper.connect_to_storage()
-    channel = workqueue_helper.connect_to_channel()
-    if None not in (engine, s3, channel):
-        channel.basic_qos(prefetch_count=1)
-        channel.basic_consume(queue='task_queue', on_message_callback=callback)
-        channel.start_consuming()
-        print(' [*] Waiting for messages. To exit press CTRL+C')
-        break
-    time.sleep(10)
+
+
+logging.log(logging.INFO, " [*] Trying to start worker")
+engine = db_helper.connect_to_db()
+s3 = storage_helper.connect_to_storage()
+channel = workqueue_helper.connect_to_channel()
+if None not in (engine, s3, channel):
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(queue='task_queue', on_message_callback=callback)
+    channel.start_consuming()
+    logging.log(logging.INFO, " [*] Waiting for messages. To exit press CTRL+C")

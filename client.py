@@ -1,4 +1,3 @@
-import fastapi
 from fastapi import FastAPI, UploadFile, Form, Request
 from typing import Annotated
 from helpers_pkg import db_helper, storage_helper, workqueue_helper

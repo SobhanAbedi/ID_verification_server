@@ -56,7 +56,7 @@ def accept(engine: Engine, request: IDCheckRequest) -> None:
         session.add(request)
         session.commit()
         session.refresh(request)
-    email_helper.send_email(request.email, "Accepted")
+        email_helper.send_email_smtp(request.email, "Accepted")
 
 
 def decline(engine: Engine, request: IDCheckRequest) -> None:
@@ -65,7 +65,7 @@ def decline(engine: Engine, request: IDCheckRequest) -> None:
         session.add(request)
         session.commit()
         session.refresh(request)
-    email_helper.send_email(request.email, "Declined")
+        email_helper.send_email_smtp(request.email, "Declined")
 
 
 def set_verification_state(engine: Engine, request: IDCheckRequest) -> None:

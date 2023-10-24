@@ -11,8 +11,8 @@ def connect_to_channel() -> BlockingChannel | None:
         channel = connection.channel()
         channel.queue_declare(queue='task_queue', durable=True)
     except AMQPConnectionError as exc:
-        logging.error(str(exc))
-        logging.error(str(exc.__cause__))
+        logging.error(exc)
+        logging.error(exc.__cause__)
     else:
         return channel
 
